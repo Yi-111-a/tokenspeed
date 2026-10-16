@@ -1047,17 +1047,6 @@ def non_unit_kv_scale_message(rejected: list[str]) -> str:
     )
 
 
-def require_unit_kv_scales(
-    weights: Iterable[tuple[str, torch.Tensor]],
-) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Pass checkpoint weights through, raising once the stream is drained if
-    a KV-cache scale is not one."""
-    rejected: list[str] = []
-    yield from record_non_unit_kv_scales(weights, rejected)
-    if rejected:
-        raise ValueError(non_unit_kv_scale_message(rejected))
-
-
 def require_unit_kv_scale_file(path: str) -> None:
     """Reject a ``--quantization-param-path`` file with a KV scale other than one."""
     try:

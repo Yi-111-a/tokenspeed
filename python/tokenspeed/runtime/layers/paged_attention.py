@@ -115,6 +115,37 @@ def head_norm(q_norm: HeadRMSNorm, k_norm: HeadRMSNorm) -> HeadNorm:
     )
 
 
+_K_SCALE_SUFFIXES = (".k_scale", "_k_scale", ".k_proj.output_scale")
+_V_SCALE_SUFFIXES = (".v_scale", "_v_scale", ".v_proj.output_scale")
+# Checkpoint tensors that hold a layer's KV-cache scales.
+KV_CACHE_SCALE_SUFFIXES = (*_K_SCALE_SUFFIXES, *_V_SCALE_SUFFIXES, ".kv_scale")
+
+
+def load_kv_cache_scale(model: nn.Module, name: str, scale: torch.Tensor) -> None:
+    """Hand a checkpoint KV-cache scale to the attention layer it belongs to.
+
+    ``name`` is the tensor's path in ``model``'s module tree; the layer is the
+    only :class:`PagedAttention` under the nearest enclosing module that has
+    one, looked for no further out than the numbered block the path names. A
+    unit scale changes nothing and needs no layer.
+    """
+    if bool(torch.all(scale == 1)):
+        return
+    parts = name.split(".")
+    for end in range(len(parts) - 1, 0, -1):
+        try:
+            module = model.get_submodule(".".join(parts[:end]))
+        except AttributeError:
+            continue
+        layers = [m for m in module.modules() if isinstance(m, PagedAttention)]
+        if len(layers) == 1:
+            layers[0].load_kv_cache_scale(name, scale)
+            return
+        if layers or parts[end - 1].isdigit():
+            break
+    raise KeyError(f"no single attention layer holds KV-cache scale {name!r}")
+
+
 class PagedAttention(nn.Module):
     """
     The attention layer implementation.
@@ -164,7 +195,7 @@ class PagedAttention(nn.Module):
         self.fp8_kv_scales: FP8TensorScales | None = None
 
     def load_kv_cache_scale(self, name: str, scale: torch.Tensor) -> None:
-        """Take a checkpoint's ``...k_scale`` or ``...v_scale`` tensor."""
+        """Take a checkpoint's key, value or shared KV-cache scale tensor."""
         if scale.numel() != 1:
             raise NotImplementedError(
                 f"PagedAttention layer_id={self.layer_id}: {name} holds "
@@ -176,12 +207,14 @@ class PagedAttention(nn.Module):
             if self.fp8_kv_scales is None
             else (self.fp8_kv_scales.k, self.fp8_kv_scales.v)
         )
-        if name.endswith(".k_scale"):
+        if name.endswith(_K_SCALE_SUFFIXES):
             k = float(scale.item())
-        elif name.endswith(".v_scale"):
+        elif name.endswith(_V_SCALE_SUFFIXES):
             v = float(scale.item())
+        elif name.endswith(".kv_scale"):
+            k = v = float(scale.item())
         else:
-            raise KeyError(f"{name!r} is not a k_scale or v_scale tensor")
+            raise KeyError(f"{name!r} is not a KV-cache scale tensor")
         self.fp8_kv_scales = None if k == v == 1.0 else FP8TensorScales(k, v)
 
     @property

@@ -41,6 +41,10 @@ from tokenspeed.runtime.layers.moe import (
     ExpertCheckpointSchema,
     build_moe_checkpoint_loader,
 )
+from tokenspeed.runtime.layers.paged_attention import (
+    KV_CACHE_SCALE_SUFFIXES,
+    load_kv_cache_scale,
+)
 from tokenspeed.runtime.layers.quantization.base_config import QuantizationConfig
 from tokenspeed.runtime.layers.utils import get_layer_id
 from tokenspeed.runtime.model_loader.weight_utils import default_weight_loader
@@ -412,10 +416,6 @@ class Qwen3OmniMoeForConditionalGeneration(Qwen3MoeForCausalLM):
         ignore_suffixes = (
             ".bias",
             "_bias",
-            ".k_scale",
-            "_k_scale",
-            ".v_scale",
-            "_v_scale",
             ".weight_scale",
             "_weight_scale",
             ".input_scale",
@@ -483,6 +483,9 @@ class Qwen3OmniMoeForConditionalGeneration(Qwen3MoeForCausalLM):
             if self.config.tie_word_embeddings and name == "lm_head.weight":
                 continue
 
+            if name.endswith(KV_CACHE_SCALE_SUFFIXES):
+                load_kv_cache_scale(self, name, loaded_weight)
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name or "mlp.experts" in name:
                     continue

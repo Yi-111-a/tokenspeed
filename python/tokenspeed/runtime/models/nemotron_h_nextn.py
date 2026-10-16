@@ -47,6 +47,10 @@ from tokenspeed.runtime.layers.logits_processor import (
     LogitsProcessor,
     LogitsProcessorOutput,
 )
+from tokenspeed.runtime.layers.paged_attention import (
+    KV_CACHE_SCALE_SUFFIXES,
+    load_kv_cache_scale,
+)
 from tokenspeed.runtime.layers.quantization.base_config import QuantizationConfig
 from tokenspeed.runtime.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -223,10 +227,13 @@ class NemotronHForCausalLMNextN(nn.Module):
         params = dict(self.named_parameters())
         expert_loader = expert_checkpoint_loader(params, self.config, self.mapping)
         for checkpoint_name, loaded in weights:
-            if checkpoint_name.startswith("mtp."):
-                load_weight(
-                    params, expert_loader, _mtp_param_name(checkpoint_name), loaded
-                )
+            if not checkpoint_name.startswith("mtp."):
+                continue
+            name = _mtp_param_name(checkpoint_name)
+            if name.endswith(KV_CACHE_SCALE_SUFFIXES):
+                load_kv_cache_scale(self, name, loaded)
+                continue
+            load_weight(params, expert_loader, name, loaded)
 
 
 EntryClass = NemotronHForCausalLMNextN

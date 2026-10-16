@@ -239,12 +239,12 @@ step writes every row itself and skips the pre-break prologue.
 
 ## Formats and scales
 
-KV caches run at unit scale unless a layer carries per-tensor scales. A model
-whose `load_weights` hands a checkpoint's `k_scale` / `v_scale` to its
-`PagedAttention` (`loads_kv_cache_scales`, `load_kv_cache_scale`) takes any
-value; for every other model `require_unit_kv_scales` rejects a scale other than
-one, and `require_unit_kv_scale_file` does the same for an FP8 KV cache's
-`--quantization-param-path`. A weight update may not change a scale.
+A model's `load_weights` hands each checkpoint `k_scale` / `v_scale` (or shared
+`kv_scale`) of a GQA layer to that layer's `PagedAttention`
+(`load_kv_cache_scale`); per-tensor values of any size load. A weight update may
+not change a scale (the session screen rejects one other than one), and
+`require_unit_kv_scale_file` still rejects a `--quantization-param-path` scale
+other than one.
 
 An FP8 cache of a scaled layer holds `K / k_scale` and `V / v_scale` saturated
 to e4m3's range: the layer passes `FP8TensorScales` as the write target's
@@ -254,8 +254,9 @@ folds `k_scale` into the logit scale and `v_scale` into the output's, and QSA's
 sparse kernel scales its logits and output the same way. The cache-group router
 refuses a scaled layer to a leaf that does not read the scales
 (`reads_fp8_kv_scales`). A cache of another dtype ignores the scales on both
-sides. Per-head scales, MLA caches and draft-tree attention over a scaled cache
-are refused.
+sides. Per-head scales and draft-tree attention over a scaled cache are
+refused. MLA caches run at unit scale: MLA models leave their checkpoint's
+KV-cache scales unloaded.
 
 An MLA layer reads its query in the activation dtype, except that an FP8
 latent cache gets an FP8 query, and FP8 expanded keys and values, whichever MLA

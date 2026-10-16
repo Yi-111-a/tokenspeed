@@ -18,7 +18,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""KV caches run at unit scale, so a checkpoint or scale file may only carry ones."""
+"""A checkpoint's KV-cache scales reach the attention layers; a scale file and a
+weight update may only carry ones."""
 
 import json
 import os
@@ -35,8 +36,9 @@ register_cuda_ci(est_time=5, suite="runtime-1gpu")
 
 from tokenspeed.runtime.execution import weight_loader  # noqa: E402
 from tokenspeed.runtime.model_loader.weight_utils import (  # noqa: E402
+    non_unit_kv_scale_message,
+    record_non_unit_kv_scales,
     require_unit_kv_scale_file,
-    require_unit_kv_scales,
 )
 
 KV_SCALE_NAMES = [
@@ -50,25 +52,31 @@ KV_SCALE_NAMES = [
 ]
 
 
+def _screen(weights):
+    """The weight-update screen: weights passed through and the scales rejected."""
+    rejected: list[str] = []
+    return list(record_non_unit_kv_scales(weights, rejected)), rejected
+
+
 def test_weights_without_kv_scales_pass_through_unchanged():
     weights = [("layers.0.self_attn.k_proj.weight", torch.ones(4, 4))]
-    assert list(require_unit_kv_scales(weights)) == weights
+    assert _screen(weights) == (weights, [])
 
 
 @pytest.mark.parametrize("name", KV_SCALE_NAMES)
 def test_unit_kv_scales_pass_through(name):
     weights = [(name, torch.ones(4))]
-    assert list(require_unit_kv_scales(weights)) == weights
+    assert _screen(weights) == (weights, [])
 
 
 @pytest.mark.parametrize("name", KV_SCALE_NAMES)
 @pytest.mark.parametrize("value", [0.5, 2.0, 1 + 2**-23, float("nan")])
-def test_a_non_unit_kv_scale_fails_the_load(name, value):
+def test_a_weight_update_rejects_a_non_unit_kv_scale(name, value):
     """One non-unit entry of a per-head scale is enough."""
     scale = torch.ones(4)
     scale[2] = value
-    with pytest.raises(ValueError, match=name):
-        list(require_unit_kv_scales([(name, scale)]))
+    _, rejected = _screen([(name, scale)])
+    assert len(rejected) == 1 and rejected[0].startswith(name)
 
 
 def test_weight_scales_are_not_mistaken_for_kv_scales():
@@ -76,23 +84,27 @@ def test_weight_scales_are_not_mistaken_for_kv_scales():
         ("layers.0.self_attn.k_proj.weight_scale", torch.tensor(0.5)),
         ("layers.0.self_attn.k_scale.weight", torch.tensor(0.5)),
     ]
-    assert list(require_unit_kv_scales(weights)) == weights
+    assert _screen(weights) == (weights, [])
 
 
-def test_the_checkpoint_error_names_every_non_unit_scale():
-    """The stream is drained before raising, so the message lists them all."""
+def test_the_rejection_names_every_non_unit_scale():
     weights = [
         ("layers.0.self_attn.k_proj.k_scale", torch.tensor(0.5)),
         ("layers.0.mlp.weight", torch.ones(2)),
         ("layers.5.self_attn.v_proj.v_scale", torch.tensor(2.0)),
     ]
-    seen = []
-    with pytest.raises(ValueError) as info:
-        for name, _ in require_unit_kv_scales(weights):
-            seen.append(name)
-    assert seen == [name for name, _ in weights]
-    assert "layers.0.self_attn.k_proj.k_scale" in str(info.value)
-    assert "layers.5.self_attn.v_proj.v_scale" in str(info.value)
+    passed, rejected = _screen(weights)
+    assert [name for name, _ in passed] == [name for name, _ in weights]
+    message = non_unit_kv_scale_message(rejected)
+    assert "layers.0.self_attn.k_proj.k_scale" in message
+    assert "layers.5.self_attn.v_proj.v_scale" in message
+
+
+def test_the_layer_and_the_screen_know_the_same_scale_names():
+    from tokenspeed.runtime.layers.paged_attention import KV_CACHE_SCALE_SUFFIXES
+    from tokenspeed.runtime.model_loader.weight_utils import _KV_SCALE_SUFFIXES
+
+    assert set(KV_CACHE_SCALE_SUFFIXES) == set(_KV_SCALE_SUFFIXES)
 
 
 def _scale_file(tmp_path, scales: dict[int, dict[int, float]]) -> str:
@@ -177,7 +189,7 @@ def test_the_loader_checks_the_scale_file_of_an_fp8_cache(
     assert checks == ([path] if checked else [])
 
 
-def test_a_checkpoint_load_rejects_a_non_unit_kv_scale(tmp_path):
+def test_a_checkpoint_load_hands_kv_scales_to_the_model(tmp_path):
     from safetensors.torch import save_file
 
     from tokenspeed.runtime.configs.load_config import LoadConfig
@@ -196,11 +208,8 @@ def test_a_checkpoint_load_rejects_a_non_unit_kv_scale(tmp_path):
     model_config = SimpleNamespace(
         model_path=str(tmp_path), revision=None, mapping=Mapping(rank=0)
     )
-    with pytest.raises(ValueError, match="k_proj.k_scale"):
-        list(loader._get_all_weights(model_config, model))
-    # A model that loads KV-cache scales into its layers takes any value.
-    model.loads_kv_cache_scales = True
-    assert len(list(loader._get_all_weights(model_config, model))) == 2
+    names = [name for name, _ in loader._get_all_weights(model_config, model)]
+    assert "model.layers.0.self_attn.k_proj.k_scale" in names
 
 
 def _attention():
@@ -273,3 +282,38 @@ def test_a_distributed_update_finishes_its_load_before_rejecting_a_scale(monkeyp
     assert not ok and "k_proj.k_scale" in message
     assert len(received) == len(names)
     assert loaded == [*names, "post_load"]
+
+
+def _decoder():
+    from torch import nn
+
+    layer = nn.Module()
+    layer.self_attn = nn.Module()
+    layer.self_attn.qkv_proj = nn.Linear(2, 2)
+    layer.self_attn.attn = _attention()
+    model = nn.Module()
+    model.layers = nn.ModuleList([layer, nn.Module()])
+    return model
+
+
+def test_a_scale_reaches_the_attention_layer_that_encloses_it():
+    from tokenspeed_kernel.ops.attention.prologue import FP8TensorScales
+
+    from tokenspeed.runtime.layers.paged_attention import load_kv_cache_scale
+
+    model = _decoder()
+    load_kv_cache_scale(model, "layers.0.self_attn.k_proj.k_scale", torch.tensor(0.5))
+    load_kv_cache_scale(model, "layers.0.self_attn.qkv_proj.v_scale", torch.tensor(2.0))
+    assert model.layers[0].self_attn.attn.fp8_kv_scales == FP8TensorScales(0.5, 2.0)
+    load_kv_cache_scale(model, "layers.0.self_attn.attn.kv_scale", torch.tensor(4.0))
+    assert model.layers[0].self_attn.attn.fp8_kv_scales == FP8TensorScales(4.0, 4.0)
+    # A unit scale changes nothing, so it needs no layer.
+    load_kv_cache_scale(model, "layers.1.self_attn.k_proj.k_scale", torch.tensor(1.0))
+    with pytest.raises(KeyError, match="layers.1.self_attn"):
+        load_kv_cache_scale(
+            model, "layers.1.self_attn.k_proj.k_scale", torch.tensor(0.5)
+        )
+    # Two attention layers under the nearest enclosing module: neither is its owner.
+    model.layers[1].attn = _attention()
+    with pytest.raises(KeyError, match="layers.extra.k_scale"):
+        load_kv_cache_scale(model, "layers.extra.k_scale", torch.tensor(0.5))

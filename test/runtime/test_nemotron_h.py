@@ -1164,6 +1164,36 @@ def test_static_per_tensor_checkpoint_runs_a_merged_projection(
     assert torch.equal(out_prequantized, out)
 
 
+def test_mtp_head_hands_its_kv_cache_scales_to_its_attention():
+    from tokenspeed_kernel.ops.attention.prologue import FP8TensorScales
+
+    from tokenspeed.runtime.distributed.mapping import Mapping
+    from tokenspeed.runtime.model_loader.utils import set_default_torch_dtype
+    from tokenspeed.runtime.models.nemotron_h_nextn import NemotronHForCausalLMNextN
+
+    config = _config(
+        hidden_size=256,
+        num_nextn_predict_layers=1,
+        mtp_layers_block_type=["attention", "moe"],
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        moe_intermediate_size=256,
+        moe_shared_expert_intermediate_size=256,
+    )
+    with torch.device("cuda"), set_default_torch_dtype(torch.bfloat16):
+        head = NemotronHForCausalLMNextN(config, Mapping(rank=0, world_size=1))
+    k, v = torch.tensor([0.0614]), torch.tensor([0.0513])
+    head.load_weights(
+        [
+            ("mtp.layers.0.mixer.k_proj.k_scale", k),
+            ("mtp.layers.0.mixer.v_proj.v_scale", v),
+        ]
+    )
+    assert head.layers[0].mixer.attn.fp8_kv_scales == FP8TensorScales(
+        k.item(), v.item()
+    )
+
+
 def test_mtp_checkpoint_names_map_onto_the_head():
     from tokenspeed.runtime.models.nemotron_h_nextn import _mtp_param_name
 

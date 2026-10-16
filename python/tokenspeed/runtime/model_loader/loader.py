@@ -64,7 +64,6 @@ from tokenspeed.runtime.model_loader.weight_utils import (
     instanttensor_weights_iterator,
     np_cache_weights_iterator,
     pt_weights_iterator,
-    require_unit_kv_scales,
     safetensors_filtered_weights_iterator,
     safetensors_weights_iterator,
 )
@@ -496,15 +495,9 @@ class DefaultModelLoader(BaseModelLoader):
             ),
         ]
         for source in sources:
-            weights = self._get_weights_iterator(
+            yield from self._get_weights_iterator(
                 source, weight_name_filter, checkpoint_load_group, mapping
             )
-            # A model that loads KV-cache scales into its attention layers
-            # takes any value; others run their caches at unit scale.
-            if getattr(model, "loads_kv_cache_scales", False):
-                yield from weights
-            else:
-                yield from require_unit_kv_scales(weights)
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(

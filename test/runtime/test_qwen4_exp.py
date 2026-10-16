@@ -1700,7 +1700,9 @@ def test_qwen4_exp_qsa_sparse_attention_reads_the_cache(
         forward_mode=ForwardMode.DECODE,
         draft_narrowing=None,
     )
-    layer = SimpleNamespace(layer_id=3, tp_q_head_num=1, head_dim=8, scaling=0.5)
+    layer = SimpleNamespace(
+        layer_id=3, tp_q_head_num=1, head_dim=8, scaling=0.5, fp8_kv_scales=None
+    )
     calls = []
 
     def sparse_attention(query, key_cache, value_cache, selected_slots, **kwargs):

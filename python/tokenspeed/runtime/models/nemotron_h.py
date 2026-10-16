@@ -69,7 +69,11 @@ from tokenspeed.runtime.layers.moe import (
 from tokenspeed.runtime.layers.moe.expert import MoELayer
 from tokenspeed.runtime.layers.moe.topk import TopK
 from tokenspeed.runtime.layers.moe.utils import RoutingMethodType
-from tokenspeed.runtime.layers.paged_attention import PagedAttention
+from tokenspeed.runtime.layers.paged_attention import (
+    KV_CACHE_SCALE_SUFFIXES,
+    PagedAttention,
+    load_kv_cache_scale,
+)
 from tokenspeed.runtime.layers.quantization.base_config import QuantizationConfig
 from tokenspeed.runtime.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from tokenspeed.runtime.model_loader.weight_utils import (
@@ -843,8 +847,8 @@ class NemotronHForCausalLM(BaseCausalLM):
                 if name.startswith(old):
                     name = new + name[len(old) :]
                     break
-            if name.endswith((".k_scale", ".v_scale")):
-                # The loader already required unit KV scales; the cache uses no scale.
+            if name.endswith(KV_CACHE_SCALE_SUFFIXES):
+                load_kv_cache_scale(self, name, loaded)
                 continue
             if ".mixer.in_proj." in name:
                 block = self.model.layers[int(name.split(".")[2])]

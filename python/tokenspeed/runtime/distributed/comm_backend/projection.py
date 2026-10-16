@@ -43,11 +43,9 @@ if TYPE_CHECKING:
 # Other TP sizes keep ordinary dispatch; direct kernel calls remain available.
 _FUSED_COL_TP_SIZES = (2, 4)
 _FUSED_COL_MIN_ROWS = 64
-# Output projection is competitive in the upper part of the 128-row bucket.
-# Smaller counts retain the ordinary path to avoid padding overhead.
+# Smaller output projections retain the ordinary path.
 _FUSED_ROW_TP_SIZES = (2, 4)
-_FUSED_ROW_MIN_ROWS = 96
-_FUSED_ROW_MAX_ROWS = 128
+_FUSED_ROW_MIN_ROWS = 64
 
 logger = logging.getLogger(__name__)
 
@@ -409,7 +407,7 @@ class ProjectionBackend:
                         workspace.fused_row = create_fused_tp_row_projection_state(
                             pg_manager.get_device_process_group(spec.group),
                             spec.device,
-                            min(spec.max_tokens, _FUSED_ROW_MAX_ROWS),
+                            spec.max_tokens,
                             spec.input_size,
                             spec.output_size,
                         )
@@ -492,13 +490,13 @@ class ProjectionBackend:
     ) -> bool:
         """Run fused DP row-linear, or leave out untouched and return False."""
         # Use the subgroup maximum so unequal or empty owners take the same
-        # collective path. Smaller owners still pad to the common 128-row bucket.
+        # collective path. Smaller owners still pad to the common row bucket.
         rows = max(owner_rows)
         if len(owner_rows) not in _FUSED_ROW_TP_SIZES:
             return False
         if (
             workspace.fused_row is None
-            or not _FUSED_ROW_MIN_ROWS <= rows <= _FUSED_ROW_MAX_ROWS
+            or rows < _FUSED_ROW_MIN_ROWS
             or weight_scales is None
             or weight.dtype != torch.float8_e4m3fn
             or weight_scales.dtype != torch.float32

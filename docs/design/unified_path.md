@@ -261,7 +261,7 @@ The TP4 row projection uses 64-row GEMM tiles in its prepared 32-row bucket
 to increase parallelism; other cases keep 128-row tiles. The resident grid and
 epoch protocol remain common across buckets, including graph replay.
 For the 12288-to-7168 row projection, TP2 uses 112 resident CTAs to match
-its largest bucket's GEMM tile count; TP4 keeps 152. The grid is fixed for
+the 128-row bucket's GEMM tile count; TP4 keeps 152. The grid is fixed for
 the prepared state, so switching buckets advances every live epoch slot.
 In the 128-row bucket, eight lanes quantize each 128-channel input group using
 16 values per lane. Independent group maxima preserve the ordinary FP8 scales.
@@ -269,14 +269,19 @@ Four scale stages and five operand stages trade shared-memory buffering to
 reduce accumulator waits; the two output stages and TMEM allocation stay fixed.
 TP2 prefetches TMA descriptors before quantization in this bucket; data loads
 still wait for input publication before consuming a peer's activation.
-Automatic
-selection covers TP2 and TP4 with a subgroup maximum of 96–128 rows for the
-12288-to-7168 KDA projection on node-local GB300 groups. These counts share the
-existing 128-row bucket; no extra kernel specialization is needed. Smaller
-counts retain the ordinary path to avoid the padding overhead.
-Other row counts, batch-invariant collectives, and unsupported configurations use the ordinary
-path. Prepared row-fusion capacity is capped at 128, independently of the larger
-ordinary workspace capacity. Both fused projections require an isolated,
+Automatic selection starts at a subgroup maximum of 64 rows for the
+12288-to-7168 KDA projection on node-local GB300 groups. Smaller counts retain
+the ordinary path to avoid padding overhead. Larger counts use the same warmed
+row buckets as column projection. There is no performance-based upper cutoff:
+prepared row-fusion capacity matches the ordinary workspace capacity, and every
+bucket up to that capacity is compiled and warmed before use. Batch-invariant
+collectives and unsupported configurations retain the ordinary path.
+Above 128 rows, the ordinary path falls back to NCCL reduction; its BF16
+reduction can differ from the fused FP32 sum of BF16 GEMM partials. Larger-row
+correctness checks use ordinary GEMM partials summed in FP32 in rank order.
+`test/runtime/distributed/test_fused_tp_projection.py` covers both projection
+directions with shared distributed setup and separate numerical references.
+Both fused projections require an isolated,
 fully resident grid; concurrent workspace use or competing distributed kernels
 remain unsupported.
 

@@ -258,7 +258,9 @@ def _prompt_ids(case: ModelCase, user_msg: str) -> list[int]:
 def _greedy_ids(
     engine: Engine, input_ids: list[int], max_new_tokens: int, *, bypass_cache: bool
 ):
-    """Greedy continuation and the prefix-cache hit the request got.
+    """Fixed-length greedy continuation and the prefix-cache hit the request got.
+
+    Ignore EOS so aligned prompt slices reach the finish checkpoint under test.
 
     ``bypass_cache`` asks for prompt logprobs from position 0: every scored
     position must be recomputed, so the admission probe is bounded at 0 and
@@ -268,7 +270,11 @@ def _greedy_ids(
     """
     resp = engine.generate(
         input_ids=input_ids,
-        sampling_params={"max_new_tokens": max_new_tokens, "temperature": 0},
+        sampling_params={
+            "max_new_tokens": max_new_tokens,
+            "temperature": 0,
+            "ignore_eos": True,
+        },
         return_logprob=bypass_cache,
         logprob_start_len=0 if bypass_cache else None,
         stream=False,

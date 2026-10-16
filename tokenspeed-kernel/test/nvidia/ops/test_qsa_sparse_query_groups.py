@@ -20,6 +20,8 @@
 
 """Exact query-prefix reuse must remain valid as captured inputs change."""
 
+from __future__ import annotations
+
 import pytest
 import torch
 from tokenspeed_kernel.platform import ArchVersion, current_platform

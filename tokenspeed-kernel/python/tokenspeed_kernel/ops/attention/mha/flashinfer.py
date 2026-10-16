@@ -33,7 +33,13 @@ from tokenspeed_kernel.platform import (
     pdl_enabled,
 )
 from tokenspeed_kernel.registry import ErrorClass, Priority, error_fn, register_kernel
-from tokenspeed_kernel.signature import format_signatures
+from tokenspeed_kernel.signature import (
+    ScaleFormat,
+    dense_tensor_format,
+    format_signature,
+    format_signatures,
+    tensor_format,
+)
 
 platform = current_platform()
 
@@ -139,6 +145,23 @@ _workspace_buffer: torch.Tensor | None = None
 
 
 if platform.is_nvidia and platform.is_hopper_plus:
+    # Dense caches, plus an FP8 cache at per-tensor scales (``fp8_kv_scales``).
+    _SCALED_FP8_CACHE = tensor_format(
+        "scaled-fp8",
+        torch.float8_e4m3fn,
+        scale=ScaleFormat(storage_dtype=torch.float32, granularity="tensor"),
+    )
+    _TRTLLM_GEN_SIGNATURES = format_signatures(
+        ("q", "k_cache", "v_cache"),
+        "dense",
+        {torch.float16, torch.bfloat16, torch.float8_e4m3fn},
+    ) | {
+        format_signature(
+            q=dense_tensor_format(torch.float8_e4m3fn),
+            k_cache=_SCALED_FP8_CACHE,
+            v_cache=_SCALED_FP8_CACHE,
+        )
+    }
 
     @register_kernel(
         "attention",
@@ -149,14 +172,9 @@ if platform.is_nvidia and platform.is_hopper_plus:
             min_arch_version=ArchVersion(10, 0),
             vendors=frozenset({"nvidia"}),
         ),
-        signatures=format_signatures(
-            ("q", "k_cache", "v_cache"),
-            "dense",
-            {torch.float16, torch.bfloat16, torch.float8_e4m3fn},
-        ),
+        signatures=_TRTLLM_GEN_SIGNATURES,
         priority=Priority.SPECIALIZED,
         traits={
-            "kv_scaled": frozenset({False, True}),
             "head_dim": frozenset({64, 128, 256}),
             "is_causal": frozenset({False, True}),
             "logit_cap": frozenset({False}),
@@ -234,14 +252,9 @@ if platform.is_nvidia and platform.is_hopper_plus:
             min_arch_version=ArchVersion(10, 0),
             vendors=frozenset({"nvidia"}),
         ),
-        signatures=format_signatures(
-            ("q", "k_cache", "v_cache"),
-            "dense",
-            {torch.float16, torch.bfloat16, torch.float8_e4m3fn},
-        ),
+        signatures=_TRTLLM_GEN_SIGNATURES,
         priority=Priority.SPECIALIZED,
         traits={
-            "kv_scaled": frozenset({False, True}),
             "logit_cap": frozenset({False}),
             "return_lse": frozenset({False}),
             "sinks": frozenset({False, True}),

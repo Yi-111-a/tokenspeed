@@ -31,7 +31,7 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
-from typing import Any, cast
+from typing import Any, Protocol, cast, runtime_checkable
 
 import huggingface_hub
 import torch
@@ -62,10 +62,12 @@ from tokenspeed.runtime.model_loader.weight_utils import (
     initialize_dummy_integer_weights,
     initialize_dummy_weights,
     instanttensor_weights_iterator,
+    non_unit_kv_scale_message,
     np_cache_weights_iterator,
     pt_weights_iterator,
     safetensors_filtered_weights_iterator,
     safetensors_weights_iterator,
+    split_kv_cache_scales,
 )
 from tokenspeed.runtime.models.extensible import ExtensibleLM
 from tokenspeed.runtime.utils import get_colorful_logger, is_pin_memory_available
@@ -171,24 +173,26 @@ def _initialize_model(
     )
 
 
-def _warn_kv_cache_scales(model: nn.Module) -> None:
-    """Name the attention layers a checkpoint gave non-unit KV-cache scales."""
-    from tokenspeed.runtime.layers.paged_attention import PagedAttention
+@runtime_checkable
+class KVCacheScaleLoader(Protocol):
+    """A model that puts its checkpoint's KV-cache scales on its attention layers."""
 
-    scales = [
-        module.fp8_kv_scales
-        for module in model.modules()
-        if isinstance(module, PagedAttention) and module.fp8_kv_scales is not None
-    ]
-    if scales:
-        k = [s.k for s in scales]
-        v = [s.v for s in scales]
-        logger.warning(
-            f"{type(model).__name__}: {len(scales)} attention layers carry "
-            f"non-unit KV-cache scales (k_scale {min(k):.4g}..{max(k):.4g}, "
-            f"v_scale {min(v):.4g}..{max(v):.4g}); an FP8 KV cache stores "
-            "K / k_scale and V / v_scale, a cache of another dtype ignores them"
+    def load_kv_cache_scales(self, scales: dict[str, torch.Tensor]) -> None:
+        """Hand each scale (keyed by checkpoint name) to its layer, skipping
+        only names that belong to another model; raise on any other name."""
+
+
+def _load_kv_cache_scales(model: nn.Module, scales: dict[str, torch.Tensor]) -> None:
+    """Startup is the only time a model takes KV-cache scales other than one;
+    weight updates drop them (``record_non_unit_kv_scales``)."""
+    if not isinstance(model, KVCacheScaleLoader):
+        raise ValueError(
+            f"{type(model).__name__}: "
+            + non_unit_kv_scale_message(
+                [f"{name}={t.flatten()[:4].tolist()}" for name, t in scales.items()]
+            )
         )
+    model.load_kv_cache_scales(scales)
 
 
 class BaseModelLoader(ABC):
@@ -487,14 +491,17 @@ class DefaultModelLoader(BaseModelLoader):
             prefix="",
             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", False),
         )
-        sources = [
+        yield from self._get_weights_iterator(
             primary_weights,
-            *cast(
-                Iterable[DefaultModelLoader.Source],
-                getattr(model, "secondary_weights", ()),
-            ),
-        ]
-        for source in sources:
+            weight_name_filter,
+            checkpoint_load_group,
+            mapping,
+        )
+
+        secondary_weights = cast(
+            Iterable[DefaultModelLoader.Source], getattr(model, "secondary_weights", ())
+        )
+        for source in secondary_weights:
             yield from self._get_weights_iterator(
                 source, weight_name_filter, checkpoint_load_group, mapping
             )
@@ -520,8 +527,14 @@ class DefaultModelLoader(BaseModelLoader):
                     )
 
             with startup_phase("weights.read_copy"):
-                model.load_weights(self._get_all_weights(model_config, model))
-            _warn_kv_cache_scales(model)
+                kv_cache_scales: dict[str, torch.Tensor] = {}
+                model.load_weights(
+                    split_kv_cache_scales(
+                        self._get_all_weights(model_config, model), kv_cache_scales
+                    )
+                )
+                if kv_cache_scales:
+                    _load_kv_cache_scales(model, kv_cache_scales)
 
             with startup_phase("weights.postprocess"):
                 # post_load_transformed_modules must recognise every hook run here.

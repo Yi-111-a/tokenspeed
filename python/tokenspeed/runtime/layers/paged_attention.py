@@ -55,6 +55,10 @@ from tokenspeed.runtime.execution.context import ForwardContext
 from tokenspeed.runtime.execution.forward_batch_info import ForwardMode
 from tokenspeed.runtime.execution.query_shard import QueryShardPlan
 from tokenspeed.runtime.layers.attention.dcp.placement import resolve_cache_slots
+from tokenspeed.runtime.model_loader.weight_utils import (
+    K_CACHE_SCALE_SUFFIXES,
+    V_CACHE_SCALE_SUFFIXES,
+)
 
 
 @dataclass(frozen=True)
@@ -113,37 +117,6 @@ def head_norm(q_norm: HeadRMSNorm, k_norm: HeadRMSNorm) -> HeadNorm:
     return HeadNorm(
         q_norm.weight, k_norm.weight, q_norm.weight_offset, q_norm.variance_epsilon
     )
-
-
-_K_SCALE_SUFFIXES = (".k_scale", "_k_scale", ".k_proj.output_scale")
-_V_SCALE_SUFFIXES = (".v_scale", "_v_scale", ".v_proj.output_scale")
-# Checkpoint tensors that hold a layer's KV-cache scales.
-KV_CACHE_SCALE_SUFFIXES = (*_K_SCALE_SUFFIXES, *_V_SCALE_SUFFIXES, ".kv_scale")
-
-
-def load_kv_cache_scale(model: nn.Module, name: str, scale: torch.Tensor) -> None:
-    """Hand a checkpoint KV-cache scale to the attention layer it belongs to.
-
-    ``name`` is the tensor's path in ``model``'s module tree; the layer is the
-    only :class:`PagedAttention` under the nearest enclosing module that has
-    one, looked for no further out than the numbered block the path names. A
-    unit scale changes nothing and needs no layer.
-    """
-    if bool(torch.all(scale == 1)):
-        return
-    parts = name.split(".")
-    for end in range(len(parts) - 1, 0, -1):
-        try:
-            module = model.get_submodule(".".join(parts[:end]))
-        except AttributeError:
-            continue
-        layers = [m for m in module.modules() if isinstance(m, PagedAttention)]
-        if len(layers) == 1:
-            layers[0].load_kv_cache_scale(name, scale)
-            return
-        if layers or parts[end - 1].isdigit():
-            break
-    raise KeyError(f"no single attention layer holds KV-cache scale {name!r}")
 
 
 class PagedAttention(nn.Module):
@@ -207,9 +180,9 @@ class PagedAttention(nn.Module):
             if self.fp8_kv_scales is None
             else (self.fp8_kv_scales.k, self.fp8_kv_scales.v)
         )
-        if name.endswith(_K_SCALE_SUFFIXES):
+        if name.endswith(K_CACHE_SCALE_SUFFIXES):
             k = float(scale.item())
-        elif name.endswith(_V_SCALE_SUFFIXES):
+        elif name.endswith(V_CACHE_SCALE_SUFFIXES):
             v = float(scale.item())
         elif name.endswith(".kv_scale"):
             k = v = float(scale.item())
@@ -355,6 +328,13 @@ class PagedAttention(nn.Module):
             and isinstance(target, HeadKVCache)
             and target.format is KVCacheFormat.FP8
         ):
+            # Every reader of this cache must apply the scales it was written at.
+            if not ctx.attn_backend.reads_fp8_kv_scales(self):
+                raise NotImplementedError(
+                    f"layer {self.layer_id} has per-tensor KV-cache scales "
+                    f"{self.fp8_kv_scales}, which "
+                    f"{type(ctx.attn_backend).__name__} does not read"
+                )
             target = replace(target, scales=self.fp8_kv_scales)
         return target
 

@@ -239,24 +239,22 @@ step writes every row itself and skips the pre-break prologue.
 
 ## Formats and scales
 
-A model's `load_weights` hands each checkpoint `k_scale` / `v_scale` (or shared
-`kv_scale`) of a GQA layer to that layer's `PagedAttention`
-(`load_kv_cache_scale`); per-tensor values of any size load. A weight update may
-not change a scale (the session screen rejects one other than one), and
-`require_unit_kv_scale_file` still rejects a `--quantization-param-path` scale
-other than one.
+KV caches run at unit scale unless the checkpoint gives a GQA layer per-tensor
+KV-cache scales. The startup loader takes every scale other than one out of the
+weight stream and hands them to the model's `load_kv_cache_scales`, which puts
+each on its layer's `PagedAttention` (`load_kv_cache_scale`); a model without
+that method refuses them. Weight updates drop scale tensors, rejecting one
+other than one, so a loaded scale never changes. `require_unit_kv_scale_file`
+rejects a `--quantization-param-path` scale other than one.
 
 An FP8 cache of a scaled layer holds `K / k_scale` and `V / v_scale` saturated
 to e4m3's range: the layer passes `FP8TensorScales` as the write target's
-`scales`, and the prologue solutions that declare the `kv_scaled` trait write
-them. Attention reads them through kernels that declare `kv_scaled`: trtllm-gen
-folds `k_scale` into the logit scale and `v_scale` into the output's, and QSA's
-sparse kernel scales its logits and output the same way. The cache-group router
-refuses a scaled layer to a leaf that does not read the scales
-(`reads_fp8_kv_scales`). A cache of another dtype ignores the scales on both
-sides. Per-head scales and draft-tree attention over a scaled cache are
-refused. MLA caches run at unit scale: MLA models leave their checkpoint's
-KV-cache scales unloaded.
+`scales` (format `fp8_per_tensor`, which the Triton solution writes). Every
+reader must apply them, so the layer refuses a backend whose
+`reads_fp8_kv_scales` is false. The MHA leaf reads through kernels that declare
+the `scaled-fp8` cache signature: trtllm-gen folds `k_scale` into the logit
+scale and `v_scale` into the output's. A cache of another dtype ignores the
+scales. MLA caches run at unit scale.
 
 An MLA layer reads its query in the activation dtype, except that an FP8
 latent cache gets an FP8 query, and FP8 expanded keys and values, whichever MLA

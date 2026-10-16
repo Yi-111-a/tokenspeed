@@ -98,7 +98,6 @@ def triton_mha_prefill(
     ),
     priority=Priority.PORTABLE,
     traits={
-        "kv_scaled": frozenset({False}),
         "is_causal": frozenset({False, True}),
         "logit_cap": frozenset({False, True}),
         "return_lse": frozenset({False, True}),
@@ -161,7 +160,6 @@ def triton_mha_extend_with_kvcache(
     ),
     priority=Priority.PORTABLE,
     traits={
-        "kv_scaled": frozenset({False}),
         "logit_cap": frozenset({False, True}),
         "return_lse": frozenset({False}),
         "sinks": frozenset({False, True}),
@@ -248,7 +246,6 @@ if current_platform().is_npu:
         ),
         priority=Priority.PERFORMANT,
         traits={
-            "kv_scaled": frozenset({False}),
             **_NPU_OPTIONS,
             "page_size": frozenset({64, 128}),
             "is_causal": frozenset({False, True}),
@@ -268,7 +265,6 @@ if current_platform().is_npu:
         ),
         priority=Priority.PERFORMANT,
         traits={
-            "kv_scaled": frozenset({False}),
             **_NPU_OPTIONS,
             "q_len": frozenset({1}),
             "page_size": frozenset({64, 128}),

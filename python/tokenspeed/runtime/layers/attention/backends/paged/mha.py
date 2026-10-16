@@ -106,8 +106,6 @@ class MHADecodeMetadata:
 class MHAAttnBackend(PagedAttentionBackend):
     """Standard MHA leaf routed through tokenspeed_kernel attention APIs."""
 
-    reads_fp8_kv_scales = True
-
     # Every kernel call site forwards layer.sliding_window_size.
     supports_layer_sliding_window: bool = True
 
@@ -157,6 +155,10 @@ class MHAAttnBackend(PagedAttentionBackend):
     def supports_narrowed_draft_decode(self, forward_mode: ForwardMode) -> bool:
         # Decode metadata exists only in decode rounds.
         return forward_mode.is_decode()
+
+    def reads_fp8_kv_scales(self, layer: PagedAttention) -> bool:
+        # Both reads hand them to the kernel (_fp8_scale_kwargs).
+        return True
 
     # ------------------------------------------------------------------
     # Metadata

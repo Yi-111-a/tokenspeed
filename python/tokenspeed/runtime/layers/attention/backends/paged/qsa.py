@@ -65,6 +65,10 @@ class QSAAttnBackend(MHAAttnBackend):
         super().init_cuda_graph_state(max_bs)
         self._metadata_capacity_rows = max_bs * self.spec_num_tokens
 
+    def reads_fp8_kv_scales(self, layer: PagedAttention) -> bool:
+        # The sparse kernel reads an FP8 cache at unit scale.
+        return False
+
     def _sparse_attention(
         self,
         q: torch.Tensor,
@@ -82,11 +86,6 @@ class QSAAttnBackend(MHAAttnBackend):
             q, topk_indices = slice_to_real_tokens(num_real, q, topk_indices)
         q = q.view(-1, layer.tp_q_head_num, layer.head_dim)
         k_cache, v_cache = token_to_kv_pool.get_kv_buffer(layer.layer_id)
-        # An FP8 cache holds K / k and V / v; the kernel scales the logits and the output back.
-        k_scale = v_scale = None
-        if k_cache.dtype == torch.float8_e4m3fn:
-            scales = layer.fp8_kv_scales
-            k_scale, v_scale = (1.0, 1.0) if scales is None else (scales.k, scales.v)
         max_seqlen_q = decode_query_lengths(
             ctx,
             q.shape[0],
@@ -100,8 +99,8 @@ class QSAAttnBackend(MHAAttnBackend):
             scale=layer.scaling,
             max_seqlen_q=max_seqlen_q,
             metadata_capacity_rows=max(q.shape[0], self._metadata_capacity_rows),
-            k_scale=k_scale,
-            v_scale=v_scale,
+            k_scale=1.0 if k_cache.dtype == torch.float8_e4m3fn else None,
+            v_scale=1.0 if v_cache.dtype == torch.float8_e4m3fn else None,
             override=None,
             solution=None,
         )

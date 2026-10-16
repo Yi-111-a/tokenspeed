@@ -27,7 +27,6 @@ from tokenspeed_kernel._triton import tl, triton
 from tokenspeed_kernel.ops.attention.prologue.types import (
     BOOLS,
     ROPE_STYLES,
-    FP8TensorScales,
     GQAPrologueOutput,
     HeadKVCache,
     HeadNorm,
@@ -366,8 +365,7 @@ def _block_tokens(num_tokens: int, block: int) -> int:
     priority=Priority.PERFORMANT,
     traits={
         "has_norm": BOOLS,
-        "kv_format": frozenset({"native", "fp8"}),
-        "kv_scaled": BOOLS,
+        "kv_format": frozenset({"native", "fp8", "fp8_per_tensor"}),
         "kv_convert": BOOLS,
         "mrope": BOOLS,
         "partial_rotary": BOOLS,
@@ -406,7 +404,7 @@ def triton_gqa_prologue(
         mrope_rows = positions.ndim == 2
         s0, s1, s2 = mrope.section if mrope_rows else (0, 0, 0)
         block_t = _block_tokens(num_tokens, triton.next_power_of_2(head_dim))
-        scales = cache.scales if isinstance(cache.scales, FP8TensorScales) else None
+        scales = cache.scales if cache.format is KVCacheFormat.FP8_PER_TENSOR else None
         _gqa_prologue_kernel[
             (triton.cdiv(num_tokens, block_t), num_q_heads + num_kv_heads)
         ](

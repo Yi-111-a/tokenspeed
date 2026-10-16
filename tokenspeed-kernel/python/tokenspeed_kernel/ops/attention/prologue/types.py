@@ -48,6 +48,7 @@ class KVCacheFormat(Enum):
     NATIVE = "native"
     FP8 = "fp8"
     MXFP8 = "mxfp8"
+    FP8_PER_TENSOR = "fp8_per_tensor"
     FP8_PER_TOKEN_HEAD = "fp8_per_token_head"
 
 
@@ -161,6 +162,8 @@ class HeadKVCache:
     def format(self) -> KVCacheFormat:
         if isinstance(self.scales, MXFP8Scales):
             return KVCacheFormat.MXFP8
+        if isinstance(self.scales, FP8TensorScales):
+            return KVCacheFormat.FP8_PER_TENSOR
         if self.k_cache.dtype == torch.float8_e4m3fn:
             return KVCacheFormat.FP8
         return KVCacheFormat.NATIVE

@@ -47,15 +47,12 @@ from tokenspeed.runtime.layers.logits_processor import (
     LogitsProcessor,
     LogitsProcessorOutput,
 )
-from tokenspeed.runtime.layers.paged_attention import (
-    KV_CACHE_SCALE_SUFFIXES,
-    load_kv_cache_scale,
-)
 from tokenspeed.runtime.layers.quantization.base_config import QuantizationConfig
 from tokenspeed.runtime.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from tokenspeed.runtime.model_loader.weight_utils import KV_CACHE_SCALE_SUFFIXES
 from tokenspeed.runtime.models.nemotron_h import (
     MixerOutput,
     NemotronHBlock,
@@ -227,13 +224,21 @@ class NemotronHForCausalLMNextN(nn.Module):
         params = dict(self.named_parameters())
         expert_loader = expert_checkpoint_loader(params, self.config, self.mapping)
         for checkpoint_name, loaded in weights:
-            if not checkpoint_name.startswith("mtp."):
-                continue
-            name = _mtp_param_name(checkpoint_name)
-            if name.endswith(KV_CACHE_SCALE_SUFFIXES):
-                load_kv_cache_scale(self, name, loaded)
-                continue
-            load_weight(params, expert_loader, name, loaded)
+            # KV-cache scales are taken only at startup (load_kv_cache_scales).
+            if checkpoint_name.startswith("mtp.") and not checkpoint_name.endswith(
+                KV_CACHE_SCALE_SUFFIXES
+            ):
+                load_weight(
+                    params, expert_loader, _mtp_param_name(checkpoint_name), loaded
+                )
+
+    def load_kv_cache_scales(self, scales: dict[str, torch.Tensor]) -> None:
+        for checkpoint_name, scale in scales.items():
+            if checkpoint_name.startswith("mtp."):
+                # mtp.layers.I.mixer.{k,v}_proj.{k,v}_scale
+                layer = checkpoint_name.removeprefix("mtp.layers.").split(".")[0]
+                block = self.layers[int(layer)]
+                block.mixer.attn.load_kv_cache_scale(checkpoint_name, scale)
 
 
 EntryClass = NemotronHForCausalLMNextN

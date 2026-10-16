@@ -40,10 +40,6 @@ from tokenspeed.runtime.layers.moe import (
     ExpertCheckpointSchema,
     build_moe_checkpoint_loader,
 )
-from tokenspeed.runtime.layers.paged_attention import (
-    KV_CACHE_SCALE_SUFFIXES,
-    load_kv_cache_scale,
-)
 from tokenspeed.runtime.layers.quantization.base_config import QuantizationConfig
 from tokenspeed.runtime.layers.quantization.utils import should_exclude_quant_module
 from tokenspeed.runtime.layers.vocab_parallel_embedding import ParallelLMHead
@@ -298,6 +294,10 @@ class Qwen3_5ForConditionalGenerationNextN(nn.Module):
         ignore_suffixes = (
             ".bias",
             "_bias",
+            ".k_scale",
+            "_k_scale",
+            ".v_scale",
+            "_v_scale",
             ".weight_scale",
             "_weight_scale",
             ".input_scale",
@@ -344,9 +344,6 @@ class Qwen3_5ForConditionalGenerationNextN(nn.Module):
                 name = name.replace(".self_attn", "")
 
             # 1) Process stacked parameters (q_proj/k_proj/v_proj & gate_proj/up_proj)
-            if name.endswith(KV_CACHE_SCALE_SUFFIXES):
-                load_kv_cache_scale(self, name, loaded_weight)
-                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-matching weights
                 if weight_name not in name:

@@ -604,9 +604,9 @@ class ModelRunner:
                 )
             if rejected:
                 return False, (
-                    f"{non_unit_kv_scale_message(rejected)}; a weight update may "
-                    f"not change a KV-cache scale ({consumed} checkpoint tensors "
-                    "had reached the model)"
+                    f"{non_unit_kv_scale_message(rejected)}; a weight update keeps "
+                    f"the KV-cache scales loaded at startup ({consumed} checkpoint "
+                    "tensors had reached the model)"
                 )
             if self.device != "cpu":
                 torch.cuda.synchronize(torch.device(f"cuda:{self.gpu_id}"))

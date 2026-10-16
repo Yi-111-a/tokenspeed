@@ -28,7 +28,6 @@ from functools import lru_cache
 import torch
 from tokenspeed_kernel.ops.attention.prologue.types import (
     CUDA_ROPE_HEAD_DIMS,
-    FP8TensorScales,
     HeadKVCache,
     HeadNorm,
     KVCacheFormat,
@@ -333,8 +332,8 @@ def _check_gqa_request(
     if isinstance(cache.scales, MXFP8Scales):
         _check_mxfp8_scales(cache, num_kv_heads, head_dim)
     if (
-        isinstance(cache.scales, FP8TensorScales)
-        and cache.format is not KVCacheFormat.FP8
+        cache.format is KVCacheFormat.FP8_PER_TENSOR
+        and cache.k_cache.dtype != torch.float8_e4m3fn
     ):
         raise ValueError("per-tensor KV scales apply to an FP8 cache only")
     if cache.format is KVCacheFormat.NATIVE and cache.k_cache.dtype not in (

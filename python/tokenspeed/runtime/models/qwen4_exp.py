@@ -52,11 +52,7 @@ from tokenspeed.runtime.layers.moe import (
     ExpertCheckpointSchema,
     build_moe_checkpoint_loader,
 )
-from tokenspeed.runtime.layers.paged_attention import (
-    KV_CACHE_SCALE_SUFFIXES,
-    PagedAttention,
-    load_kv_cache_scale,
-)
+from tokenspeed.runtime.layers.paged_attention import PagedAttention
 from tokenspeed.runtime.layers.quantization.base_config import QuantizationConfig
 from tokenspeed.runtime.layers.qwen4_exp_ple import (
     Qwen4ExpNGramEmbedding,
@@ -706,6 +702,10 @@ def load_qwen4_exp_weights(
     ignored_suffixes = (
         ".bias",
         "_bias",
+        ".k_scale",
+        "_k_scale",
+        ".v_scale",
+        "_v_scale",
         ".weight_scale",
         "_weight_scale",
         ".input_scale",
@@ -756,9 +756,6 @@ def load_qwen4_exp_weights(
                 embedding.lookup.load_shard(loaded_weight, 0, 1)
                 loaded.add(f"{module_name}.lookup.ngram_embedding.weight")
                 continue
-        if name.endswith(KV_CACHE_SCALE_SUFFIXES):
-            load_kv_cache_scale(module, name, loaded_weight)
-            continue
         for param_name, weight_name, shard_id in stacked:
             if weight_name not in name or "mlp.experts" in name or "visual" in name:
                 continue

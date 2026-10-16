@@ -62,11 +62,7 @@ from tokenspeed.runtime.layers.moe import (
     ExpertCheckpointSchema,
     build_moe_checkpoint_loader,
 )
-from tokenspeed.runtime.layers.paged_attention import (
-    KV_CACHE_SCALE_SUFFIXES,
-    PagedAttention,
-    load_kv_cache_scale,
-)
+from tokenspeed.runtime.layers.paged_attention import PagedAttention
 from tokenspeed.runtime.layers.parameter import (
     BlockQuantScaleParameter,
     PerTensorScaleParameter,
@@ -1191,9 +1187,6 @@ class Qwen3_5ForCausalLM(nn.Module):
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
 
-            if name.endswith(KV_CACHE_SCALE_SUFFIXES):
-                load_kv_cache_scale(self, name, loaded_weight)
-                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -1258,6 +1251,10 @@ class Qwen3_5MoeModel(Qwen3_5ForCausalLM):
         ignore_suffixes = (
             ".bias",
             "_bias",
+            ".k_scale",
+            "_k_scale",
+            ".v_scale",
+            "_v_scale",
             ".weight_scale",
             "_weight_scale",
             ".input_scale",
@@ -1295,9 +1292,6 @@ class Qwen3_5MoeModel(Qwen3_5ForCausalLM):
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
 
-            if name.endswith(KV_CACHE_SCALE_SUFFIXES):
-                load_kv_cache_scale(self, name, loaded_weight)
-                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -1649,9 +1643,6 @@ class Qwen3_5ForConditionalGeneration(BaseCausalLM):
                 name = name.replace(r"attn.qkv.", r"attn.qkv_proj.")
                 name = name.replace(r"model.visual.", r"visual.")
 
-            if name.endswith(KV_CACHE_SCALE_SUFFIXES):
-                load_kv_cache_scale(self, name, loaded_weight)
-                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -1727,6 +1718,10 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3_5ForConditionalGeneration):
         ignore_suffixes = (
             ".bias",
             "_bias",
+            ".k_scale",
+            "_k_scale",
+            ".v_scale",
+            "_v_scale",
             ".weight_scale",
             "_weight_scale",
             ".input_scale",
@@ -1774,9 +1769,6 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3_5ForConditionalGeneration):
                 name = name.replace(r"attn.qkv.", r"attn.qkv_proj.")
                 name = name.replace(r"model.visual.", r"visual.")
 
-            if name.endswith(KV_CACHE_SCALE_SUFFIXES):
-                load_kv_cache_scale(self, name, loaded_weight)
-                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue

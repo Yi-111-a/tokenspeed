@@ -167,7 +167,8 @@ def persistent_topk(
         logits: Contiguous FP32 scores shaped ``[rows, columns]``.
         lengths: Valid lengths per row, or per request with grouped queries.
         output: Int32 ``[rows, k]`` buffer, filled with indices and ``-1`` padding.
-        workspace: Caller-owned uint8 workspace.
+        workspace: Unused uint8 CUDA tensor kept for ABI compatibility.
+            May be zero-sized.
         k: Number of selected columns: 512, 1024 or 2048.
         max_seq_len: Maximum columns scanned by a row.
         q_len_per_req: Query rows per request; 1 selects per-row lengths.

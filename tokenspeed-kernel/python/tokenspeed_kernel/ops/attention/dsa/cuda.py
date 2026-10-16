@@ -220,7 +220,8 @@ def ragged_decode_topk(
             selected column indices.
         topk: Number of candidates to select per row.
         lengths: Per-row valid context length, cast to int32 and flattened.
-        workspace: Scratch uint8 buffer for the persistent kernel.
+        workspace: Unused uint8 CUDA tensor kept for ABI compatibility.
+            May be zero-sized.
         max_seq_len: Max scanned columns; defaults to ``logits.shape[1]``.
         q_len_per_req: Query rows per request (speculative decode); 1 for decode.
         enable_pdl: Enable programmatic CUDA launch dependencies.

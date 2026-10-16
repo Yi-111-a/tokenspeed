@@ -108,7 +108,7 @@ def _check_graph_edges(graph, enabled):
     assert tested > 0
 
 
-def _check_replays(forward, sources, targets, enabled):
+def _check_replays(forward, sources, targets, enabled, *, unordered_outputs):
     # Explicit kernel arguments must take precedence over the global setting.
     pdl_enabled(not enabled)
     forward(enabled)
@@ -128,6 +128,9 @@ def _check_replays(forward, sources, targets, enabled):
         pdl_enabled(not enabled)
         graph.replay()
         for result, reference in zip(actual, expected):
+            if unordered_outputs:
+                result = result.sort(dim=-1).values
+                reference = reference.sort(dim=-1).values
             torch.testing.assert_close(result, reference, rtol=0, atol=0)
 
 
@@ -184,7 +187,6 @@ def test_qsa_selection_waits_for_query_cache_and_metadata(
             queries_per_request=queries_per_request,
             max_partial_bytes=32 * 1024 * 1024,
             algorithm=algorithm,
-            persistent_topk_workspace=None,
             enable_pdl=enable_pdl,
         )
         slots = qwen4_exp_qsa_selected_slots(
@@ -200,7 +202,7 @@ def test_qsa_selection_waits_for_query_cache_and_metadata(
         )
         return selected, slots
 
-    _check_replays(forward, sources, targets, enabled)
+    _check_replays(forward, sources, targets, enabled, unordered_outputs=True)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -276,7 +278,7 @@ def test_qsa_compression_orders_ring_reuse(enabled, write_rows, restore_pdl):
         )
         return out, compressed, raw, pos_cache
 
-    _check_replays(forward, sources, targets, enabled)
+    _check_replays(forward, sources, targets, enabled, unordered_outputs=False)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -315,14 +317,12 @@ def test_qsa_attention_waits_for_slots_and_kv(
         )
         return (output,)
 
-    _check_replays(forward, sources, targets, enabled)
+    _check_replays(forward, sources, targets, enabled, unordered_outputs=False)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("persistent", [False, True])
-def test_qsa_selection_refreshes_block_frontiers(enabled, persistent, restore_pdl):
-    if persistent and not has_ragged_decode_topk():
-        pytest.skip("CUDA persistent top-k is unavailable")
+@pytest.mark.parametrize("topk", [64, 512])
+def test_qsa_selection_refreshes_block_frontiers(enabled, topk, restore_pdl):
     batch, width, heads, dim, page_size, blocks = 3, 4, 4, 128, 64, 17408
     rows = batch * width
     query = torch.randn(rows, heads, dim, device="cuda", dtype=torch.bfloat16)
@@ -336,11 +336,6 @@ def test_qsa_selection_refreshes_block_frontiers(enabled, persistent, restore_pd
     ).reshape(batch, -1)
     requests = torch.arange(batch, device="cuda").repeat_interleave(width)
     complete = torch.zeros(rows, device="cuda", dtype=torch.int32)
-    workspace = (
-        torch.empty(1024 * 1024, device="cuda", dtype=torch.uint8)
-        if persistent
-        else None
-    )
 
     def forward(enable_pdl):
         _publish(sources, targets)
@@ -351,11 +346,10 @@ def test_qsa_selection_refreshes_block_frontiers(enabled, persistent, restore_pd
             requests,
             complete,
             page_size=page_size,
-            block_topk=512,
+            block_topk=topk,
             queries_per_request=width,
             max_partial_bytes=32 * 1024 * 1024,
             algorithm="logits",
-            persistent_topk_workspace=workspace,
             enable_pdl=enable_pdl,
         )
 

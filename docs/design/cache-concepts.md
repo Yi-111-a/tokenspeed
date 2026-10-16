@@ -1019,13 +1019,16 @@ Its responsibilities:
   later `batch_exists` hit may register them again; there is no blacklist),
   and returns the request to `Submitted` at its original queue position. Its
   admission is then a plain Host hit: no forward is ever skipped or retracted
-  for L3, and no admission load-back can miss. For hybrid models, prefetch
-  also carries available State checkpoints within the matched KV coverage.
-  Each checkpoint carries its required sliding-window blocks as well, so an
-  earlier checkpoint remains usable when the KV coverage extends farther.
-  Missing intermediate checkpoints do not truncate the KV prefix; admission
-  probes the landed Host entries again and resumes only at a boundary with
-  every required State group, including after a partial landing.
+  for L3, and no admission load-back can miss. The shared aligned probe
+  matches token-spanned groups only. The L3 prefetch probe then adds available
+  State checkpoints within that coverage and each checkpoint's required
+  sliding-window blocks, so an earlier checkpoint remains usable when the KV
+  coverage extends farther. Missing intermediate checkpoints do not truncate
+  the fetch coverage; this coverage is not an admissible resume boundary.
+  Device and Host retain their ordinary candidate phase, which requires every
+  State group and window at the chosen boundary. It uses the same window
+  geometry as prefetch and checks actual cached entries, whether they were
+  published locally or landed from L3, including after a partial landing.
   The D role probes the Device
   alone and never prefetches. Existence and prefetch are skipped when L3 is
   unset: Host-only and `--disable-kvstore` admission must not hash prefixes

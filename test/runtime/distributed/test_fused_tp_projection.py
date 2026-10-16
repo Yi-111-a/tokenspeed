@@ -484,6 +484,7 @@ def _check_row_projection(rank, world_size, device, parallel, config):
         )
     ]
     patterns += [
+        tuple((256, 192, 65, 0)[:world_size]),
         tuple((128, 65, 1, 0)[:world_size]),
         tuple((96, 65, 1, 0)[:world_size]),
         tuple((32, 17, 1, 0)[:world_size]),
@@ -538,6 +539,7 @@ def _check_row_projection(rank, world_size, device, parallel, config):
     _reset_epochs(state)
     # One graph switches buckets and includes an empty owner; replay new inputs.
     counts_list = [
+        tuple((256, 192, 65, 0)[:world_size]),
         (129,) * world_size,
         (256,) * world_size,
         (257,) * world_size,

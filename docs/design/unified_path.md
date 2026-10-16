@@ -248,6 +248,8 @@ and does not support concurrent workspace use or competing distributed kernels.
 For row projection, each rank computes BF16 partial outputs and their owner
 sums them in FP32 before rounding to BF16. This preserves the fused numerical
 contract, though ordinary BF16 collective reductions can round differently.
+Larger batches distribute the reduction across row and output-channel tiles
+to use more of the resident grid.
 
 ### Padding contract
 

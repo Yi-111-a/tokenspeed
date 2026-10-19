@@ -135,7 +135,9 @@ class OutputProcessor:
                 "prompt_tokens": recv_obj.prompt_tokens[i],
                 "weight_version": self.engine.server_args.weight_version,
             }
-            logprobs_info = state.logprobs_info if not state.obj.stream else {}
+            logprobs_info = state.logprobs_info if not state.obj.stream else {
+                "cumulative_logprob": state.logprobs_info.get("cumulative_logprob", 0.0)
+            }
 
             obj = state.obj
             sp = getattr(obj, "sampling_params", None) or {}

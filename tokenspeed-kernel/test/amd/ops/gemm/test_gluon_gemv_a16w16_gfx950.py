@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+from tokenspeed_kernel.numerics.torch.gemm import torch_mm
 from utils import assert_no_triton_compile, is_cdna4
 
 if not is_cdna4():
@@ -35,6 +36,7 @@ from tokenspeed_kernel.ops.gemm.gluon import (  # noqa: E402
     gluon_gemv_a16w16_gfx950 as registered_gemv,
 )
 from tokenspeed_kernel_amd.ops.gfx950.gemm.fp16.gemv import (  # noqa: E402
+    _PREFERRED_BUCKETS,
     gluon_gemv_a16w16_gfx950,
     launch_gluon_gemv_a16w16_gfx950,
     prefers_gluon_gemv_a16w16_gfx950,
@@ -52,7 +54,7 @@ _SHAPES = [(2560, 320), (2560, 3072), (512, 2560), (6656, 2560), (1000, 1040), (
 
 
 def _reference(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-    return (x.double() @ w.double().T).to(x.dtype)
+    return torch_mm(x.double(), w.double(), None, None, x.dtype)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -155,9 +157,27 @@ def test_mm_takes_the_gemv_only_at_its_measured_buckets(m):
         ), (m, n, k)
 
 
+# Row counts each M bucket of _PREFERRED_BUCKETS covers.
+_BUCKET_ROWS = {1: range(1, 2), 4: range(2, 5), 16: range(5, 17)}
+
+
+def test_selection_takes_the_gemv_on_every_listed_bucket():
+    # A listed entry the GEMV cannot serve (say a K that is not a multiple of
+    # 16) or a bucket other than 1, 4 or 16 would never be selected, silently
+    # keeping the slower default.
+    for (n, k), buckets in _PREFERRED_BUCKETS.items():
+        for bucket in buckets:
+            assert bucket in _BUCKET_ROWS, ((n, k), bucket)
+            for m in _BUCKET_ROWS[bucket]:
+                selected = _select_mv(
+                    m, n, k, True, torch.bfloat16, torch.bfloat16, False
+                )
+                assert selected is registered_gemv, (m, n, k)
+
+
 @pytest.mark.parametrize("m", [1, 4, 16])
 def test_mm_routes_a_measured_shape_through_the_gemv(m):
-    n, k = 2560, 3072
+    n, k = 1280, 2560
     x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
     w = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) / k**0.5
     expected = x.new_empty(m, n)

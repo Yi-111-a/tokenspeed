@@ -36,12 +36,12 @@ import importlib
 import inspect
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from types import SimpleNamespace
 
 import pytest
-import tokenspeed_kernel.numerics.reference.gemm as _gemm_reference
+import tokenspeed_kernel.numerics.torch.gemm as _gemm_reference
 import tokenspeed_kernel.ops.attention as _attention_pkg
 import tokenspeed_kernel.ops.attention.cuda as _attention_cuda
 import tokenspeed_kernel.ops.attention.dsa as _attention_dsa_pkg
@@ -79,6 +79,7 @@ import tokenspeed_kernel.ops.attention.rmha.gluon as _attention_gluon_rmha
 import tokenspeed_kernel.ops.attention.triton as _attention_triton_merge_state
 import tokenspeed_kernel.ops.gemm as _gemm_pkg
 import tokenspeed_kernel.ops.gemm.cuda as _gemm_cuda
+import tokenspeed_kernel.ops.gemm.cute_dsl as _gemm_cute_dsl
 import tokenspeed_kernel.ops.gemm.flashinfer as _gemm_flashinfer
 import tokenspeed_kernel.ops.gemm.gluon as _gemm_gluon
 import tokenspeed_kernel.ops.gemm.triton as _gemm_triton
@@ -142,6 +143,7 @@ from tokenspeed_kernel.selection import (
     spec_matches_traits,
 )
 from tokenspeed_kernel.signature import dense_tensor_format, format_signature
+from utils import is_amd
 
 _ATTENTION_GLUON_MODULES = [
     _attention_gluon_dsa,
@@ -186,6 +188,7 @@ _RELOAD_MODULES = [
     # GEMM registration modules.
     _gemm_reference,
     _gemm_cuda,
+    _gemm_cute_dsl,
     _gemm_flashinfer,
     _gemm_gluon,
     _gemm_triton,
@@ -301,7 +304,9 @@ def test_residual_family_exports_and_modes():
         "gated_residual_combine",
         "gated_residual_mix",
         "mhc_apply_pre",
+        "mhc_apply_pre_quantize_fp8",
         "mhc_fused_hc",
+        "mhc_init",
         "mhc_mixes",
         "mhc_post",
         "mhc_pre",
@@ -309,6 +314,7 @@ def test_residual_family_exports_and_modes():
         "post_norm_residual_pre_norm",
         "post_norm_residual_pre_norm_bf16",
         "residual_gate_coefficients",
+        "try_mhc_shifted_post_pre_norm",
     }
     assert set(_residual_pkg.__all__) == expected_exports
     residual_modes = {
@@ -321,9 +327,12 @@ def test_residual_family_exports_and_modes():
         "hyperconnection_combine",
         "hyperconnection_mix",
         "mhc_apply_pre",
+        *({"mhc_apply_pre_fp8_group32"} if Platform.get().is_amd else set()),
+        "mhc_init",
         "mhc_mixes",
         "mhc_post",
         "mhc_pre",
+        "mhc_shifted_post_pre_norm",
         "normalized_dot_gate",
     }
 
@@ -346,6 +355,9 @@ def test_builtin_moe_specialized_offsets_are_intentional() -> None:
     """Only proven same-band overlaps may use specialized priority offsets."""
     registry = KernelRegistry.get()
     expected_offsets = {
+        # Prefer packed FP8 experts over the overlapping block-FP8 Gluon plan.
+        "gluon_fp8_packed_ep1_precomputed_moe_apply": Priority.SPECIALIZED + 1,
+        "gluon_fp8_packed_ep4_precomputed_moe_apply": Priority.SPECIALIZED + 1,
         "gluon_mxfp4_a4w4_ep_deferred_precomputed_moe_apply": Priority.SPECIALIZED + 1,
         "gluon_mxfp4_dynamic_moe_apply": Priority.SPECIALIZED + 1,
         # Prefer the coupled MXFP8 bank over the overlapping A16 EP8 plan.
@@ -548,6 +560,18 @@ def _mm_mxfp8_ue8m0(m: int, n: int, k: int) -> torch.Tensor:
         B_scales=b_scales,
         out_dtype=torch.bfloat16,
         block_size=[1, 32],
+        quant="mxfp8",
+    )
+
+
+def _mm_fp32_blockscale(m: int, n: int, k: int, out_dtype: torch.dtype) -> torch.Tensor:
+    return kernel_mm(
+        torch.empty((m, k), dtype=_fp8_dtype()),
+        torch.empty((n, k), dtype=_fp8_dtype()),
+        A_scales=torch.empty((m, (k + 127) // 128), dtype=torch.float32),
+        B_scales=torch.empty(((n + 127) // 128, (k + 127) // 128), dtype=torch.float32),
+        out_dtype=out_dtype,
+        block_size=[128, 128],
         quant="mxfp8",
     )
 
@@ -932,7 +956,7 @@ def test_mm_fp8_reference_selection_follows_b_layout(b_layout) -> None:
         B_scales=scale,
         out_dtype=torch.float32,
         quant="fp8",
-        solution="reference",
+        solution="torch",
     )
 
     torch.testing.assert_close(out, a.float() @ b_kn.float())
@@ -2955,6 +2979,7 @@ def test_deepep_selects_apply_kernel_by_weight_dtype_without_pinned_solution(
             expert_id_repeats=False,
             fast_math=True,
             combine_order="rank",
+            features=frozenset(),
         )
     finally:
         Platform.override(real_platform)
@@ -2997,6 +3022,7 @@ def test_nvfp4_deepep_rejects_modes_without_normal_legs(
                 expert_id_repeats=False,
                 fast_math=True,
                 combine_order="rank",
+                features=frozenset(),
             )
     finally:
         Platform.override(real_platform)
@@ -3028,6 +3054,7 @@ def test_moe_plan_rejects_persistent_workspace_for_ordinary_kernel(
                 expert_id_repeats=False,
                 fast_math=True,
                 combine_order="rank",
+                features=frozenset(),
             )
     finally:
         Platform.override(real_platform)
@@ -3083,6 +3110,7 @@ def test_deepep_plan_carries_mode_and_low_latency_capacity(b200_platform) -> Non
             expert_id_repeats=False,
             fast_math=True,
             combine_order="rank",
+            features=frozenset(),
         )
     finally:
         Platform.override(real_platform)
@@ -3108,6 +3136,7 @@ def test_moe_plan_defaults_deepep_mode_to_auto() -> None:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     assert plan["deepep_mode"] == "auto"
     assert plan["deepep_low_latency_max_num_tokens_per_gpu"] is None
@@ -3139,6 +3168,7 @@ def test_moe_plan_rejects_invalid_deepep_mode(
             expert_id_repeats=False,
             fast_math=True,
             combine_order="rank",
+            features=frozenset(),
         )
 
 
@@ -3451,6 +3481,7 @@ def test_gfx950_dynamic_mxfp4_moe_selects_gluon_a4w4(
             expert_id_repeats=False,
             fast_math=False,
             combine_order="rank",
+            features=frozenset(),
         )
         return kernel_moe_plan("mxfp4", **{**kwargs, **overrides})
 
@@ -3473,6 +3504,207 @@ def test_gfx950_dynamic_mxfp4_moe_selects_gluon_a4w4(
     )
     assert with_bias["apply_kernel_name"] == "triton_mxfp4_precomputed_moe_apply"
     assert bf16_activations["apply_kernel_name"] == "gluon_mxfp4_precomputed_moe_apply"
+
+
+@pytest.mark.parametrize(
+    "platform_fixture,rows,expected",
+    [
+        ("h100_platform", 129, None),
+        ("b200_platform", 1, "triton_quantize_fp8_per_token"),
+        ("b200_platform", 129, None),
+        ("mi350_platform", 129, "triton_quantize_fp8_per_token_portable"),
+        ("mi450_platform", 129, None),
+    ],
+)
+def test_token_quantizer_preserves_required_minimum_scale(
+    request, monkeypatch, platform_fixture, rows, expected
+):
+    monkeypatch.setattr(
+        Platform, "_instance", request.getfixturevalue(platform_fixture)
+    )
+    monkeypatch.setattr(KernelRegistry.get(), "_selection_cache", {})
+    select = partial(
+        _quantization_pkg.select_fp8_token_quantizer,
+        rows,
+        torch.bfloat16,
+        solution="triton",
+        override=None,
+        required_features=frozenset({"token_fp8_min_scaling"}),
+    )
+    if expected is None:
+        with pytest.raises(kernel_NoKernelFoundError):
+            select()
+    else:
+        assert select().name == expected
+
+
+@pytest.mark.parametrize(
+    "family,mode,name",
+    [
+        ("gemm", "mm", "triton_mm_fp8_scaled"),
+        ("moe", "apply", "triton_fp8_channel_fused_precomputed_moe_apply"),
+        ("quantization", "fp8_with_scale", "triton_quantize_fp8_per_token_portable"),
+    ],
+)
+@pytest.mark.parametrize(
+    "platform_fixture,arch_version,dense_eligible,gfx950_eligible",
+    [
+        ("a100_platform", ArchVersion(8, 0), False, False),
+        ("h100_platform", ArchVersion(9, 0), False, False),
+        ("b200_platform", ArchVersion(10, 0), True, False),
+        ("b300_platform", ArchVersion(10, 3), True, False),
+        ("mi350_platform", ArchVersion(9, 4), False, False),
+        ("mi350_platform", ArchVersion(9, 5), True, True),
+        ("mi350_platform", ArchVersion(12, 0), True, False),
+        ("mi450_platform", ArchVersion(12, 5), True, False),
+    ],
+)
+def test_fp8_kernels_select_supported_hardware(
+    request,
+    platform_fixture,
+    arch_version,
+    dense_eligible,
+    gfx950_eligible,
+    family,
+    mode,
+    name,
+) -> None:
+    platform = replace(
+        request.getfixturevalue(platform_fixture), arch_version=arch_version
+    )
+    candidates = KernelRegistry.get().get_for_operator(
+        family, mode, platform=platform, solution="triton"
+    )
+    eligible = dense_eligible if family == "gemm" else gfx950_eligible
+    assert (name in {candidate.name for candidate in candidates}) == eligible
+
+
+def _moe_fp8_channel_plan(platform: PlatformInfo, **overrides) -> dict:
+    kwargs = dict(
+        weight_dtype="fp8_channel",
+        input_dtype=torch.bfloat16,
+        activation="silu",
+        routing_mode="precomputed_topk",
+        ep_size=1,
+        ispp=640,
+        hidden=5120,
+        swiglu_form="standard",
+        activation_clamped=False,
+        expert_id_repeats=False,
+        fast_math=False,
+        combine_order="rank",
+        features=frozenset(),
+    )
+    kwargs.update(overrides)
+    registry = KernelRegistry.get()
+    real_platform = Platform.get()
+    try:
+        Platform.override(platform)
+        registry.clear_cache()
+        return kernel_moe_plan(**kwargs)
+    finally:
+        Platform.override(real_platform)
+        registry.clear_cache()
+
+
+@pytest.mark.parametrize("intermediate", [320, 640])
+def test_default_fp8_channel_plan_selects_gluon(
+    mi350_platform: PlatformInfo,
+    intermediate: int,
+) -> None:
+    plan = _moe_fp8_channel_plan(
+        mi350_platform, ispp=intermediate, num_experts=256, top_k=8
+    )
+    assert plan["apply_kernel_name"] == _moe_gluon.GLUON_FP8_CHANNEL_APPLY
+
+
+@pytest.mark.parametrize("intermediate", [320, 640])
+@pytest.mark.parametrize(
+    "solution,expected",
+    [
+        ("gluon", _moe_gluon.GLUON_FP8_CHANNEL_APPLY),
+        ("triton", "triton_fp8_channel_fused_precomputed_moe_apply"),
+    ],
+)
+def test_explicit_fp8_channel_plan_preserves_solution(
+    mi350_platform: PlatformInfo,
+    intermediate: int,
+    solution: str,
+    expected: str,
+) -> None:
+    plan = _moe_fp8_channel_plan(
+        mi350_platform,
+        solution=solution,
+        ispp=intermediate,
+        num_experts=256,
+        top_k=8,
+    )
+    assert plan["apply_kernel_name"] == expected
+    assert plan["weight_preprocessor"] is None
+    assert not plan["supports_deferred_finalize"]
+
+
+@pytest.mark.parametrize(
+    "geometry",
+    [
+        {},
+        {"num_experts": 256},
+        {"top_k": 8},
+        {"num_experts": 128, "top_k": 8},
+        {"num_experts": 256, "top_k": 4},
+    ],
+)
+def test_fp8_channel_plan_falls_back_for_unsupported_or_unknown_counts(
+    mi350_platform: PlatformInfo,
+    geometry: dict,
+) -> None:
+    plan = _moe_fp8_channel_plan(mi350_platform, **geometry)
+    assert plan["apply_kernel_name"] == "triton_fp8_channel_fused_precomputed_moe_apply"
+    with pytest.raises(kernel_NoKernelFoundError):
+        _moe_fp8_channel_plan(mi350_platform, solution="gluon", **geometry)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"ep_size": 2},
+        {"ispp": 352},
+        {"hidden": 2048},
+        {"activation_clamped": True},
+        {"expert_id_repeats": True},
+        {"requires_deferred_finalize": True},
+        {"with_bias": True},
+    ],
+)
+def test_gluon_fp8_channel_plan_rejects_unsupported_geometry(
+    mi350_platform: PlatformInfo,
+    override: dict,
+) -> None:
+    with pytest.raises(kernel_NoKernelFoundError):
+        _moe_fp8_channel_plan(
+            mi350_platform, solution="gluon", num_experts=256, top_k=8, **override
+        )
+
+
+@pytest.mark.parametrize(
+    "dtype,width,expected",
+    [
+        ("unquant", 640, "gluon_bf16_precomputed_moe_apply"),
+        ("fp8", 1024, "gluon_fp8_block_precomputed_moe_apply"),
+    ],
+)
+def test_legacy_gluon_plans_keep_existing_implementation(
+    mi350_platform: PlatformInfo,
+    dtype: str,
+    width: int,
+    expected: str,
+) -> None:
+    if not is_amd() and KernelRegistry.get().get_by_name(expected) is None:
+        pytest.skip("Legacy Gluon implementations are only registered on AMD")
+    plan = _moe_fp8_channel_plan(
+        mi350_platform, weight_dtype=dtype, ispp=width, solution="gluon"
+    )
+    assert plan["apply_kernel_name"] == expected
 
 
 def _select_on(platform: PlatformInfo, *args, **kwargs) -> str:
@@ -3657,6 +3889,7 @@ def test_gluon_mxfp4_plan_selects_dynamic_apply_on_cdna4(
             expert_id_repeats=False,
             fast_math=True,
             combine_order="rank",
+            features=frozenset(),
         )
     finally:
         Platform.override(real_platform)
@@ -3694,6 +3927,7 @@ def test_triton_mxfp4_supports_input_activation_dtype(
             expert_id_repeats=False,
             fast_math=True,
             combine_order="rank",
+            features=frozenset(),
         )
         assert plan["apply_kernel_name"] == "triton_mxfp4_precomputed_moe_apply"
     finally:
@@ -3757,6 +3991,7 @@ def test_kimi3_mxfp4_situ_selection_on_cdna4(
             expert_id_repeats=False,
             fast_math=True,
             combine_order="rank",
+            features=frozenset(),
         )
     finally:
         Platform.override(real_platform)
@@ -3803,6 +4038,7 @@ def test_gluon_mxfp4_swiglu_ep_traits_select_matching_kernel(
             expert_id_repeats=False,
             fast_math=True,
             combine_order="rank",
+            features=frozenset(),
         )
     finally:
         Platform.override(real_platform)
@@ -3811,10 +4047,13 @@ def test_gluon_mxfp4_swiglu_ep_traits_select_matching_kernel(
     assert plan["apply_kernel_name"] == kernel_name
 
 
-def test_gluon_mxfp4_a4w4_deferred_ep4_traits_select_matching_kernel(
+@pytest.mark.parametrize("ep_size,ispp", [(4, 4096), (8, 4096), (1, 512)])
+def test_gluon_mxfp4_a4w4_deferred_traits_select_matching_kernel(
     mi350_platform: PlatformInfo,
+    ep_size: int,
+    ispp: int,
 ) -> None:
-    """The deferred A4W4 route path is selected for EP4."""
+    """Both expert and tensor partitions retain deferred per-route outputs."""
     registry = KernelRegistry.get()
     kernel_name = "gluon_mxfp4_a4w4_ep_deferred_precomputed_moe_apply"
     if registry.get_by_name(kernel_name) is None:
@@ -3831,8 +4070,8 @@ def test_gluon_mxfp4_a4w4_deferred_ep4_traits_select_matching_kernel(
             requires_deferred_finalize=True,
             routing_mode="precomputed_topk",
             a2a_backend="none",
-            ep_size=4,
-            ispp=4096,
+            ep_size=ep_size,
+            ispp=ispp,
             internal_activation_dtype="mxfp4",
             with_bias=False,
             solution="gluon",
@@ -3842,6 +4081,7 @@ def test_gluon_mxfp4_a4w4_deferred_ep4_traits_select_matching_kernel(
             expert_id_repeats=False,
             fast_math=False,
             combine_order="rank",
+            features=frozenset(),
         )
     finally:
         Platform.override(real_platform)
@@ -3849,6 +4089,7 @@ def test_gluon_mxfp4_a4w4_deferred_ep4_traits_select_matching_kernel(
 
     assert plan["apply_kernel_name"] == kernel_name
     assert plan["supports_prequantized_input"] is True
+    assert plan["deferred_output_is_token_order"] is True
 
 
 def test_kimi3_mxfp4_situ_ep8_bias_avoids_a8_apply(
@@ -3878,6 +4119,7 @@ def test_kimi3_mxfp4_situ_ep8_bias_avoids_a8_apply(
             expert_id_repeats=False,
             fast_math=True,
             combine_order="rank",
+            features=frozenset(),
         )
     finally:
         Platform.override(real_platform)
@@ -3970,6 +4212,7 @@ def test_kimi3_mxfp4_situ_tp_selection_on_cdna5(
             expert_id_repeats=False,
             fast_math=True,
             combine_order="rank",
+            features=frozenset(),
         )
     finally:
         Platform.override(real_platform)
@@ -4009,6 +4252,7 @@ def test_dsv41_mxfp4_swiglu_tp_selection_on_cdna5(
             expert_id_repeats=False,
             fast_math=True,
             combine_order="rank",
+            features=frozenset(),
         )
     finally:
         Platform.override(real_platform)
@@ -4270,6 +4514,7 @@ def _moe_apply_unquant_trtllm() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4332,6 +4577,7 @@ def _moe_apply_unquant_cutlass() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4358,6 +4604,7 @@ def _moe_apply_fp8_cutlass() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4400,6 +4647,7 @@ def _moe_apply_mxfp4_plan(
         solution=solution,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
 
 
@@ -4544,6 +4792,33 @@ def test_mxfp4_w4a8_needs_the_swiglu_clamp() -> None:
     assert plan["apply_kernel_name"] == "flashinfer_cutlass_mxfp4_w4a8_moe_apply"
 
 
+@pytest.mark.parametrize(
+    "platform_fixture,solution,weights_dtype,deferred",
+    [
+        ("b200_platform", "flashinfer_trtllm", torch.bfloat16, True),
+        ("h100_platform", "flashinfer_cutlass", torch.float32, False),
+    ],
+)
+def test_mxfp4_plan_preserves_consumer_weight_precision(
+    request, platform_fixture, solution, weights_dtype, deferred
+) -> None:
+    if not Platform.get().is_nvidia:
+        pytest.skip("FlashInfer registrations require NVIDIA")
+    host_platform = Platform.get()
+    try:
+        Platform.override(request.getfixturevalue(platform_fixture))
+        plan = _moe_apply_mxfp4_plan(
+            activation="swiglu",
+            ispp=2304,
+            internal_activation_dtype="input",
+            solution=solution,
+        )
+        assert plan["topk_weights_dtype"] == weights_dtype
+        assert plan["supports_deferred_finalize"] == deferred
+    finally:
+        Platform.override(host_platform)
+
+
 def test_mxfp4_fp8_activation_fails_closed_on_backends_without_a_w4a8_kernel() -> None:
     # --moe-mxfp4-fp8-activation is not gated by a backend allowlist in
     # ServerArgs; the plan refuses a backend that has no FP8-activation kernel.
@@ -4597,6 +4872,7 @@ def _moe_apply_fp8_trtllm() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4623,6 +4899,7 @@ def _moe_apply_nvfp4_trtllm() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4655,6 +4932,7 @@ def _moe_apply_nvfp4_cutlass() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4682,6 +4960,7 @@ def _moe_apply_nvfp4_trtllm_routed() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4721,6 +5000,7 @@ def _moe_apply_nvfp4_trtllm_unconstrained_routing() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4749,6 +5029,7 @@ def _moe_apply_unquant_trtllm_routed() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4788,6 +5069,7 @@ def _moe_apply_nvfp4_deepep_cutedsl() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4818,6 +5100,7 @@ def _moe_apply_fp8_deepep_deep_gemm() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4854,6 +5137,7 @@ def _moe_apply_mxfp4_trtllm() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4881,6 +5165,7 @@ def _moe_apply_mxfp4_triton() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4916,6 +5201,7 @@ def _moe_apply_fp8_block(ispp: int, apply: str, preprocessor: str | None) -> obj
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(plan, apply=apply, preprocessor=preprocessor)
     x = torch.empty((4, 16), dtype=torch.bfloat16)
@@ -4948,6 +5234,7 @@ def _moe_apply_unquant_triton() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -4982,6 +5269,7 @@ def _moe_apply_mxfp4_gluon() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -5007,6 +5295,7 @@ def _moe_apply_mxint4_trtllm() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -5032,6 +5321,7 @@ def _moe_apply_mxfp4_dynamic_tp() -> object:
         expert_id_repeats=False,
         fast_math=True,
         combine_order="rank",
+        features=frozenset(),
     )
     _assert_moe_plan(
         plan,
@@ -6235,9 +6525,26 @@ _CASES = [
         "cdna4",
         "gemm",
         "mm",
-        "triton_mm_fp8_blockscale",
+        "gluon_mm_fp8_blockscale_gfx950",
         lambda: _mm_mxfp8(4),
     ),
+    *[
+        _case(
+            _is_cdna4,
+            "cdna4",
+            "gemm",
+            "mm",
+            expected,
+            partial(_mm_fp32_blockscale, m, n, k, dtype),
+            id_suffix=f"fp32-blockscale-m{m}-n{n}-k{k}-{dtype}",
+        )
+        for m, n, k, dtype, expected in (
+            (17, 130, 3072, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+            (896, 6144, 4096, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+            (8192, 4096, 512, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+            (4, 128, 512, torch.float16, "triton_mm_fp8_blockscale"),
+        )
+    ],
     # DeepSeek V4.1 MXFP8 projections on gfx950: the weight-streaming decode
     # kernel through 256 rows (ahead of the skinny kernel's 64-row range),
     # the large-tile kernel beyond, and from 64 rows on for 2**26-element
@@ -6877,6 +7184,7 @@ def test_b200_fp8_swiglu_selects_trtllm_routed_moe(
             expert_id_repeats=False,
             fast_math=True,
             combine_order="rank",
+            features=frozenset(),
         )
 
         assert plan["apply_kernel_name"] == ("flashinfer_trtllm_fp8_routed_moe_apply")
